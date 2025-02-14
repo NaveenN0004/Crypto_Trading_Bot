@@ -4,8 +4,8 @@ RISK_REWARD_RATIO = 2
 TRAILING_STOP_PERCENTAGE = 0.01
 
 # API credentials for CoinDCX
-API_KEY = "Enter_Your_API_Key"
-API_SECRET = "Enter_Your_API_Secret"
+API_KEY = "Enter Your API Key"
+API_SECRET = "Enter Your API Secret"
 
 # timeframe
 GRANULARITY = "5m"
