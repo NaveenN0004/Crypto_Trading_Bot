@@ -2,7 +2,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 from core.OMS import OrderManagementSystem
-from config.settings import DEBUG_MODE
+from config.settings import DEBUG_MODE, TRAILING_STOP_PERCENTAGE
 from utils.historical_data import HistoricalData
 from utils.technical_indicators import TechnicalIndicators
 from core.quantity_utils import QuantityUtils
@@ -21,12 +21,11 @@ class TradingLogic:
 
     def monitor_position(self, trading_pair: str, entry_price: float, quantity: float,
                          stop_loss_price: float, take_profit_price: float,
-                         investment_amount: float, wallet_balance: float) -> bool:        
-        # monitor an open position and trigger a sell if stop-loss or take-profit is hit
-        # returns True for closed position 
-
+                         investment_amount: float, wallet_balance: float) -> bool:
+        # monitor an open position and trigger a sell if stop-loss, trailing stop, or take-profit is hit
         print(f"\n📗 Monitoring position for {trading_pair} (Entry: {entry_price})")
         try:
+            highest_price = entry_price  # initialize highest price reached
             while True:
                 current_price = MarketData.fetch_real_time_price(trading_pair)
                 if current_price is None:
@@ -34,13 +33,19 @@ class TradingLogic:
                     time.sleep(5)
                     continue
 
+                # update highest price and compute trailing stop loss price
+                if current_price > highest_price:
+                    highest_price = current_price
+                trailing_stop_price = highest_price * (1 - TRAILING_STOP_PERCENTAGE)
+
                 unrealized_pnl = (current_price - entry_price) * quantity
                 pnl_percentage = (unrealized_pnl / investment_amount) * 100
                 current_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
                 print(f"\r🕒 {current_time} UTC | 💹 Current Price: {current_price:.2f} | P&L: {unrealized_pnl:.2f} ({pnl_percentage:.2f}%)", end="")
 
+                # Check for static stop loss first
                 if current_price <= stop_loss_price:
-                    print(f"\n🛑 Stop Loss triggered at {current_price}")
+                    print(f"\n🛑 Static Stop Loss triggered at {current_price}")
                     sell_order = self.place_order(
                         order_side="sell",
                         trading_pair=trading_pair,
@@ -69,6 +74,38 @@ class TradingLogic:
                         )
                     return True
 
+                # check for trailing stop loss if price has risen
+                if current_price <= trailing_stop_price and current_price < highest_price:
+                    print(f"\n🛑 Trailing Stop Loss triggered at {current_price} (Highest: {highest_price:.2f}, Trailing SL: {trailing_stop_price:.2f})")
+                    sell_order = self.place_order(
+                        order_side="sell",
+                        trading_pair=trading_pair,
+                        current_price=current_price,
+                        investment_amount=investment_amount,
+                        wallet_balance=wallet_balance,
+                        stop_loss_price=None,
+                        take_profit_price=None,
+                        initial_price=entry_price
+                    )
+                    if sell_order:
+                        print(f"✅ Trailing Stop Loss order executed successfully at {current_time} UTC")
+                        Logger.log_trade(
+                            trading_pair=trading_pair,
+                            current_price=current_price,
+                            investment_amount=investment_amount,
+                            quantity=quantity,
+                            wallet_balance=wallet_balance,
+                            order_type="sell",
+                            stop_loss_price=None,
+                            take_profit_price=None,
+                            initial_price=entry_price,
+                            profit=(current_price - entry_price) * quantity,
+                            sell_price=current_price,
+                            buy_price=entry_price
+                        )
+                    return True
+
+                # Check for take profit
                 if current_price >= take_profit_price:
                     print(f"\n🎯 Take Profit triggered at {current_price}")
                     sell_order = self.place_order(
@@ -107,9 +144,7 @@ class TradingLogic:
     def place_order(self, order_side: str, trading_pair: str, current_price: float, investment_amount: float,
                     wallet_balance: float, stop_loss_price: Any, take_profit_price: Any,
                     initial_price: Any = None) -> Any:
-        # place a buy or sell order using the OMS
-        # returns the order object if successful
-        
+        # place a buy or sell order using the OMS and log the trade
         try:
             market_details = MarketData.get_market_details(trading_pair)
             if not market_details:
@@ -161,9 +196,8 @@ class TradingLogic:
             return None
 
     def monitor_price_and_execute(self, investment_amount: float, trading_pair: str,
-                                  stop_loss_price: float, take_profit_price: float) -> None:        
+                                  stop_loss_price: float, take_profit_price: float) -> None:
         # continuously monitor market price and execute orders when a signal is detected
-        
         print("\n📡 Monitoring Market Price...")
         try:
             while True:
